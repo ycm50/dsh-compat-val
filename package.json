@@ -1,0 +1,50 @@
+{
+  "name": "dsh-compact-threshold",
+  "version": "0.1.0",
+  "description": "One settings card that gives every DSH agent preset its own compaction threshold: the plugin authors <mode>-compact-<ratio> preset copies with compaction-basic.thresholdRatio rewritten, so 0.4 (or any value) applies to every mode instead of only a hand-made preset.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "engines": {
+      "dsh": ">=0.1.5-rc.1"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [],
+      "platform": "web"
+    }
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-settings": "^0.1.2-alpha.1 || ^0.1.5-rc.2",
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-settings": {
+      "optional": true
+    }
+  },
+  "license": "MIT",
+  "keywords": [
+    "deepseek",
+    "dsh",
+    "dsh-plugin",
+    "compaction",
+    "context",
+    "threshold",
+    "settings"
+  ]
+}

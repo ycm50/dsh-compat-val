@@ -1,0 +1,8 @@
+# dsh-compact-threshold: inserts this plugin into a profile's layer stack.
+#
+# Host plane only: the card reaches the browser through the `dsh.client` entry
+# below, and the preset roster this plugin drives (`ctx.agentPresets`) is a host
+# service, so nothing here belongs to an agent preset.
+- insert:
+    - id: compact-threshold
+      name: dsh-compact-threshold
