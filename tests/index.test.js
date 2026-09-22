@@ -1,13 +1,14 @@
 /**
  * Unit tests for the pure parts of dsh-compact-threshold: the ratio tag that
- * preset ids admit, the managed id derived from it, and the composition
- * rewrite that injects or replaces the compaction threshold.
+ * preset ids admit, the managed id derived from it, the composition rewrite that
+ * injects or replaces the compaction threshold, and the default-mode takeover
+ * (which copy wins, and when it is adopted, kept, or released).
  */
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { managedId, ratioTag, rewriteThreshold } from "../lib/index.js";
+import { isOwnedId, managedId, pickDefault, planDefault, ratioTag, rewriteThreshold } from "../lib/index.js";
 
 const COMPOSITION = fileURLToPath(new URL("../fixtures/standard-like.cordis.yml", import.meta.url));
 
@@ -69,4 +70,146 @@ test("rewriteThreshold handles the real shipped composition", async () => {
 	assert.equal(after.length, before.length + 2);
 	assert.equal(after[0], before[0]);
 	assert.equal(after[after.length - 1], before[before.length - 1]);
+});
+
+test("isOwnedId recognizes a copy of a configured source, and nothing else", () => {
+	assert.equal(isOwnedId("standard-compact-4", ["standard", "ptc"]), true);
+	assert.equal(isOwnedId("ptc-compact-75", ["standard", "ptc"]), true);
+	// A source the user unchecked no longer proves ownership: the managed list is
+	// the only other witness, which is why the record is written back.
+	assert.equal(isOwnedId("standard-compact-4", ["minimal"]), false);
+	assert.equal(isOwnedId("standard", ["standard"]), false);
+	assert.equal(isOwnedId("standard-compact", ["standard"]), false);
+	assert.equal(isOwnedId(undefined, ["standard"]), false);
+});
+
+test("pickDefault prefers 标准 > 创造 > 极简 > ptc", () => {
+	const candidates = [
+		{ id: "ptc-compact-4", source: "ptc" },
+		{ id: "minimal-compact-4", source: "minimal" },
+		{ id: "cordis-compact-4", source: "cordis" },
+		{ id: "standard-compact-4", source: "standard" }
+	];
+	assert.equal(pickDefault(candidates), "standard-compact-4");
+	assert.equal(pickDefault(candidates.slice(0, 3)), "cordis-compact-4");
+	assert.equal(pickDefault(candidates.slice(0, 2)), "minimal-compact-4");
+	assert.equal(pickDefault(candidates.slice(0, 1)), "ptc-compact-4");
+	// Input order must not decide: the table does.
+	assert.equal(pickDefault([...candidates].reverse()), "standard-compact-4");
+});
+
+test("pickDefault ranks an unlisted source below every listed one, stably", () => {
+	const candidates = [
+		{ id: "house-style-compact-4", source: "house-style" },
+		{ id: "ptc-compact-4", source: "ptc" },
+		{ id: "zeta-compact-4", source: "zeta" }
+	];
+	assert.equal(pickDefault(candidates), "ptc-compact-4", "any listed source beats an unlisted one");
+	assert.equal(
+		pickDefault([{ id: "b-compact-4", source: "b" }, { id: "a-compact-4", source: "a" }]),
+		"a-compact-4",
+		"same rank falls back to the id so the winner is stable across runs"
+	);
+});
+
+test("pickDefault returns undefined when nothing was authored", () => {
+	assert.equal(pickDefault([]), undefined);
+	assert.equal(pickDefault(undefined), undefined);
+	assert.equal(pickDefault([{ id: "", source: "standard" }]), undefined);
+});
+
+/** The state every takeover test starts from: no copy adopted yet. */
+const FRESH = {
+	enabled: true,
+	adoptDefault: true,
+	candidate: "standard-compact-4",
+	current: "standard",
+	userDefault: undefined,
+	sources: ["standard"],
+	managed: [],
+	defaultPreset: "",
+	previousDefault: ""
+};
+
+test("planDefault adopts the winning copy and records a restore point", () => {
+	const adopted = planDefault(FRESH);
+	assert.equal(adopted.kind, "set");
+	assert.equal(adopted.value, "standard-compact-4");
+	// Nothing in the user layer before the takeover: releasing UNSETS the field so
+	// the deployment's own default shows through again.
+	assert.deepEqual(adopted.patch, { defaultPreset: "standard-compact-4", previousDefault: "" });
+
+	const userChose = planDefault({ ...FRESH, current: "minimal", userDefault: "minimal" });
+	assert.deepEqual(userChose.patch, { defaultPreset: "standard-compact-4", previousDefault: "minimal" });
+});
+
+test("planDefault keeps the ORIGINAL restore point across later saves", () => {
+	const again = planDefault({
+		...FRESH,
+		current: "ptc-compact-4",
+		defaultPreset: "standard-compact-3",
+		previousDefault: "minimal",
+		managed: ["standard-compact-3"]
+	});
+	assert.equal(again.kind, "set");
+	assert.equal(again.value, "standard-compact-4");
+	assert.equal(again.patch.previousDefault, "minimal", "a later save must not record this plugin's own id as the thing to restore");
+});
+
+test("planDefault is idempotent once the copy is the default", () => {
+	const plan = planDefault({ ...FRESH, current: "standard-compact-4", defaultPreset: "standard-compact-4" });
+	assert.equal(plan.kind, "none");
+	assert.deepEqual(plan.patch, {}, "an unchanged default must not write, or every sync would bump the revision");
+});
+
+test("planDefault records ownership when the copy already is the default", () => {
+	const plan = planDefault({ ...FRESH, current: "standard-compact-4", userDefault: "standard-compact-4" });
+	assert.equal(plan.kind, "none");
+	// No write to the presets namespace, but the record still lands — and the
+	// pre-takeover value is a copy this plugin will delete, so it degrades to
+	// "inherit" rather than restoring a preset that is about to disappear.
+	assert.deepEqual(plan.patch, { defaultPreset: "standard-compact-4", previousDefault: "" });
+});
+
+test("planDefault releases the default when the feature turns off", () => {
+	const disabled = planDefault({
+		...FRESH,
+		enabled: false,
+		candidate: undefined,
+		current: "standard-compact-4",
+		defaultPreset: "standard-compact-4"
+	});
+	assert.equal(disabled.kind, "unset");
+	assert.equal(disabled.value, "");
+	assert.deepEqual(disabled.patch, { defaultPreset: "", previousDefault: "" });
+
+	// The per-save switch releases the same way, and a recorded user choice comes
+	// back instead of being unset.
+	const off = planDefault({
+		...FRESH,
+		adoptDefault: false,
+		current: "standard-compact-4",
+		defaultPreset: "standard-compact-4",
+		previousDefault: "minimal"
+	});
+	assert.equal(off.kind, "restore");
+	assert.equal(off.value, "minimal");
+	assert.deepEqual(off.patch, { defaultPreset: "", previousDefault: "" });
+});
+
+test("planDefault releases a stale copy the managed list no longer names", () => {
+	// The threshold changed while the takeover was off, so the copy standing as
+	// the default was already retired: only the id shape proves it is ours.
+	const plan = planDefault({ ...FRESH, candidate: undefined, current: "standard-compact-3", managed: [] });
+	assert.equal(plan.kind, "unset");
+});
+
+test("planDefault never rewrites a default this plugin did not set", () => {
+	const handPicked = planDefault({ ...FRESH, candidate: undefined, current: "minimal", userDefault: "minimal" });
+	assert.equal(handPicked.kind, "none");
+	assert.deepEqual(handPicked.patch, {}, "a mode the user picked by hand stays picked while no copy exists");
+
+	const offAndForeign = planDefault({ ...FRESH, adoptDefault: false, current: "cordis", userDefault: "cordis" });
+	assert.equal(offAndForeign.kind, "none");
+	assert.deepEqual(offAndForeign.patch, {});
 });
