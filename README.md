@@ -58,6 +58,37 @@ DSH 把压缩阈值（`compaction-basic.thresholdRatio`，上游默认 **0.8**�
 
 改动只影响**新建会话**（`defaultId` 每次创建会话现读设置），运行中的会话仍停在它当初组装的那个 preset 上。
 
+## 两代宿主（0.1.5-rc.x / 0.1.7+）
+
+DSH 在这两代之间换了设置模型，本插件**两边都支持**，且靠运行时探测而不是版本号：
+
+| | 0.1.5-rc.x | 0.1.7+ |
+|---|---|---|
+| 本插件设置的位置 | 插件自有命名空间 `dsh-compact-threshold` | profile 条目 id `compact-threshold`（即 `cordis.patch.yml` 里的 `id`） |
+| 注册方式 | `settings.installSection()` 注册的栏目 | 条目自己的 `Config`，表单由宿主从 schema 生成 |
+| 哪些字段能改 | 全部 | 只有 **volatile** 字段：宿主只为 volatile 字段生成表单、也只接受对它们的写入 |
+| 卡片挂载点 | `settings.plugin.item` + `settingsScope` | `settings.section` + `configForms.get('compact-threshold')` |
+| 默认模式写在哪 | `agent-presets` 命名空间的 `default` | `agent-preset-registry` 条目的 volatile `selectedDefault`（那里普通的 `default` 是**部署**默认，插件不该移动它） |
+| 何时重算 | 写入后由 `installSection` 的 `setSource` 回调触发 | volatile 写入**不重挂载**，靠 `settings/document-updated` 事件触发；普通字段改动会重挂载并重跑 `apply` |
+
+判定方式（都不看版本号）：
+
+- 宿主侧：`typeof settings.installSection === "function"` —— 这是 0.1.7+ 已经删掉的 API。
+- schema 侧：`live()` 给每个字段打 volatile 标记 —— 有 `volatile()` 就调它，没有就直接写 `meta.volatile = true`（那个方法本身只是 `extra('volatile', true)`）。**只探测方法是不够的**：宿主跑的是 schemastery 3.18.3，但**安装后的插件 import 的是 profile 里那份 3.18.2**（Node 就近解析），那份没有 `volatile()`；只探测就会让所有字段保持普通字段 → 0.1.7+ 的 `describe()` 直接跳过本条目、写入被拒（表现为卡片上「Host 现值 undefined」、保存不生效）。3.18.2 的 `meta` 与 `toJSON()` 都能正常携带这个键，所以直接写标记在两代都成立（旧世代的 settings 服务完全不读 volatile）。
+- 客户端侧：静态 `inject` 只声明 `slots`（两代都有），`configForms` 与 `settingsScope` 各自走一次可选 `ctx.inject`。静态声明任一服务名都会让另一代**永远 pending** —— 这正是旧版在 0.1.7+ 上挂在启动面板上的原因。
+
+0.1.7+ 上还会做两件事：用 `settings.configure({ auto: false })` 关掉宿主自动生成的重复页面（只留本插件自己的卡片）；若检测到「模式选择」开关被关掉，只警告一次说明 `selectedDefault` 当前不生效（不去替用户打开它）。
+
+**保存的 revision 护栏**：两代 `settings` 都以 revision 做闸（写入带的 `expectedRevision` 与注册时的 revision 不一致就整笔拒绝）。本插件的**宿主面会把 `managedPresets` / `skippedPresets` / `defaultPreset` 写回同一节**，而一次保存恰好会让它重写一遍副本——于是点击瞬间读到的 revision 可能已经过期，写入被拒。被拒的写入在返回前会**先重载镜像**，所以卡片 `save()` 最多重试 4 次（每次之间等 250ms 让镜像刷新），每次都重新取 revision 围栏；4 次都没落地时不再猜原因，而是把「提交值 / Host 现值 / revision / Host 回执」原样打在卡片上。
+
+**为什么还要"重新挂载自己"一次**：0.1.7+ 的 loader 对"只动了 volatile 字段"的变更走快路径——把新值写进**运行中 config 的 live 引用**，不重挂载（`vendor/loader/src/config/entry.ts` 的 `_commitVolatile`）。而本插件解析到的是 **profile 里那份 schemastery 3.18.2**，它不会生成任何 live 引用：`volatileEntries(fiber.config)` 为空 → loader 认为"没有要更新的东西"（`if (!refs.length) return true`）→ 运行中的 config 永远停在旧值，而 `settings.describe()`（卡片读的就是它）正是读运行中的 config——所以刚保存的值会被报成"未生效"，只有重启/重挂载才生效。因此本插件在收到自己条目的 `settings/document-updated` 后，从 **loader 条目的组合配置**（`entry.options.config`，那份已经是新值）取新配置并 `fiber.update(raw, true)` 自己重挂一次，让运行值与组合一致。比较是按本 schema 的字段逐个比对，收敛一轮即停，不会和自己的回写互相触发。
+
+**两代宿主的"副本"是两种东西**：0.1.5-rc.x 的预设是**磁盘上的目录**（`~/.dsh/.agent-presets/<id>/`，roster 通过 `resolvedRoots` / `readDocument` / `read` / `remove` 读写），所以本插件写文件；0.1.7+ 的预设是**内存里的声明**——`@deepseek-ai/dsh-agent-preset-registry` 只维护一张 `definitions` 表，唯一的作者接口是 `agentPresets.register(definition)`，而 `list()` / `resolve()` 只回答元数据、`compositionInventory()` 只回答挂载诊断，**都拿不到组合**。因此现代路径从**装载器条目**取源组合（预设声明行就是 `{ id: 'preset-<name>', name: '@deepseek-ai/dsh-agent-preset', config: { id, order, plugins } }`，行插件原样 `register(config)`），把含 `compaction-basic` 的行结构化改写后 `register()` 成 `<mode>-compact-<tag>`，并保留返回的注销函数以便阈值变化时回收旧副本。找不到声明行的模式（`minimal`）按同一理由跳过。
+
+**为什么写入要由"模块加载时创建的定时器"来驱动**：0.1.7+ 的 `settings/document-updated` 是在**那次保存自己的 HMR 事务内部**发出的，而 HMR 用 `AsyncLocalStorage` 记"事务开着"——在那个上下文里创建的任何异步资源（定时器、promise 续体）都会继承它，此时再写设置会被拒（`HMR transactions cannot be nested`），本插件的记账与默认接管就会**静默丢失**（表现：副本已生成、卡片却显示旧值，默认模式还指向已被回收的副本）。所以事件处理只置一个标志，真正的写入由**模块加载时**创建的定时器执行——它带着模块原本的上下文，永远不会落在别人的事务里；写记账与接管之后再用 `fiber.update` 重挂自己，让 `describe()` 服务的运行值跟上。
+
+**模式列表什么时候刷新**：浏览器里的预设选择器只在挂载时（以及它自己写完预设后）拉一次名单，宿主直接写目录它并不知道。0.1.7+ 的 `ui-agent-preset` 会订阅 `settings/document-updated` 里 `agent-preset-registry` 这一条（`api/remotes/src/remote-events.ts` 允许该事件转发给浏览器），而写副本本身不是对该命名空间的写入，所以本插件在改动过副本后**主动补发这个事件**，新模式无需刷新页面即可出现；0.1.5-rc.x 的客户端没有这个订阅，那一代保存后需要**刷新页面（F5）**才能看到新模式（目录会被 `list()` 每次重新扫描，副本本身是合规的：id 合法、`agent.cordis.yml` + `preset.yml` 齐全）。
+
 ## 它不做什么
 
 - **不劫持内置预设**：内置模式的 ID 依然原样可用，插件生成的是**追加的新模式**。
@@ -76,7 +107,7 @@ dsh plugin --profile web add github:ycm50/dsh-compact-threshold
 
 ## 验证
 
-`node --test`（18 个用例）覆盖纯函数：ratio 到 ID 的映射、行内已有 `thresholdRatio` 的替换、无 `config:` 块时的插入、缩进内层行的插入、前后边界不被改动、**对内置 `standard` composition 的真实改写**（只多两行、首尾字节不变），以及默认模式接管：优先级阶梯（标准 > 创造 > 极简 > ptc）、表外源与同档 id 的稳定排序、空候选、首次接管记录还原点、后续保存保留**原始**还原点、幂等不重写、无副本时释放（`restore` 与 `unset` 两路）、以及**不动手选的默认模式**。
+`node --test`（21 个用例）覆盖纯函数：ratio 到 ID 的映射、行内已有 `thresholdRatio` 的替换、无 `config:` 块时的插入、缩进内层行的插入、前后边界不被改动、**对内置 `standard` composition 的真实改写**（只多两行、首尾字节不变）、默认模式接管：优先级阶梯（标准 > 创造 > 极简 > ptc）、表外源与同档 id 的稳定排序、空候选、首次接管记录还原点、后续保存保留**原始**还原点、幂等不重写、无副本时释放（`restore` 与 `unset` 两路）、**不动手选的默认模式**，以及两代设置键映射（`presetTarget`）、`Config` 默认值、**每个 `Config` 字段都带 volatile 标记**（0.1.7+ 表单可见性与写入许可全看这个标记）。
 
 真机验证记录：在隔离 profile 中启动后，`~/.dsh/.agent-presets` 出现
 `standard-compact-4` / `ptc-compact-4` / `cordis-compact-4`，其中 `standard-compact-4/agent.cordis.yml:149` 为 `thresholdRatio: 0.4`，`preset.yml` 显示名为「标准模式 · 压缩阈值 0.4」；`settings.yaml` 中 `managedPresets` 3 项、`skippedPresets` 记录了 `minimal` 的原因。
@@ -88,7 +119,7 @@ dsh plugin --profile web add github:ycm50/dsh-compact-threshold
 - 需要 `ctx.agentPresets`（DSH 0.1.5-rc.1 起为宿主服务）；没有预设roster的部署无法使用。
 - 需要一个 settings provider（`@deepseek-ai/dsh-settings-file` 之类）才能持久化；没有时插件静默不生成任何东西，宿主照常启动。
 - 需要用户可写预设根；没有时插件会明确报错而不静默失败。
-- 接管默认模式需要 `agent-presets` 设置命名空间存在（由 `@deepseek-ai/dsh-agent-presets` 注册）；没有它只影响默认模式，副本生成不受影响。
+- 接管默认模式需要预设的设置键存在：0.1.5-rc.x 是 `agent-presets` 命名空间（由 `@deepseek-ai/dsh-agent-presets` 注册），0.1.7+ 是 `agent-preset-registry` 条目（由 `@deepseek-ai/dsh-agent-preset-registry` 注册）；没有它只影响默认模式，副本生成不受影响。
 
 ## 结构
 

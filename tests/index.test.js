@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { isOwnedId, managedId, pickDefault, planDefault, ratioTag, rewriteThreshold } from "../lib/index.js";
+import { Config, declaredDefinitions, isOwnedId, managedId, pickDefault, planDefault, presetTarget, ratioTag, rewriteComposition, rewriteThreshold } from "../lib/index.js";
 
 const COMPOSITION = fileURLToPath(new URL("../fixtures/standard-like.cordis.yml", import.meta.url));
 
@@ -213,3 +213,77 @@ test("planDefault never rewrites a default this plugin did not set", () => {
 	assert.equal(offAndForeign.kind, "none");
 	assert.deepEqual(offAndForeign.patch, {});
 });
+
+test("presetTarget names each generation's settings key and field", () => {
+	// 0.1.5-rc.x: a plugin-owned settings namespace whose `default` is the mode.
+	assert.deepEqual(presetTarget(true), { ns: "agent-presets", field: "default" });
+	// 0.1.7+: the presets registry is an ordinary profile entry. Its user layer is
+	// the volatile `selectedDefault`; `default` there is the deployment's own and
+	// is deliberately not this plugin's to move.
+	assert.deepEqual(presetTarget(false), { ns: "agent-preset-registry", field: "selectedDefault" });
+});
+
+test("Config keeps its documented defaults", () => {
+	const value = Config({});
+	assert.equal(value.enabled, true);
+	assert.equal(value.thresholdRatio, 0.4);
+	assert.equal(value.retainRatio, 0.16);
+	assert.deepEqual(value.sourcePresets, ["standard", "minimal", "ptc", "cordis"]);
+	assert.equal(value.adoptDefault, true);
+	assert.deepEqual(value.managedPresets, []);
+	assert.equal(value.defaultPreset, "");
+	assert.equal(value.previousDefault, "");
+	assert.equal(Config({ thresholdRatio: 0.5 }).thresholdRatio, 0.5);
+});
+
+test("every Config field is marked volatile, whichever schemastery resolved", () => {
+	// 0.1.7+ builds its settings form out of volatile fields and refuses writes to
+	// any other path, so a field that loses this flag makes the entry vanish from
+	// the form ("Host current value undefined") and rejects every save. The plugin
+	// must not depend on `volatile()` existing: an installed copy imports the
+	// PROFILE's schemastery (3.18.2 today), which has no such method.
+	const fields = Object.entries(Config.dict ?? {});
+	assert.ok(fields.length > 0, "Config must expose its fields for the form");
+	for (const [key, field] of fields) {
+		assert.equal(field.meta?.volatile, true, `${key} must carry the volatile flag`);
+	}
+});
+
+test("rewriteComposition edits the declared compaction row and leaves the rest alone", () => {
+	// 0.1.7+ presets are loader rows, not composition text: the structured twin of
+	// `rewriteThreshold` must find the same row inside nested group rows.
+	const plugins = [
+		{ id: "persona", name: "@deepseek-ai/dsh-persona" },
+		{
+			id: "compaction",
+			group: true,
+			config: [
+				{ id: "compaction-basic", name: "@deepseek-ai/dsh-compaction-basic", config: { thresholdRatio: 0.8, retainRatio: 0.16 } },
+			],
+		},
+		{ id: "tools", name: "@deepseek-ai/dsh-tools", config: { verbose: true } },
+	];
+	const { plugins: rewritten, found } = rewriteComposition(plugins, 0.45);
+	assert.equal(found, true);
+	assert.equal(rewritten[1].config[0].config.thresholdRatio, 0.45);
+	assert.equal(rewritten[1].config[0].config.retainRatio, 0.16, "sibling config keys survive");
+	assert.equal(rewritten[2].config.verbose, true, "untouched rows are copied through");
+	assert.equal(plugins[1].config[0].config.thresholdRatio, 0.8, "the source composition is never mutated");
+	assert.equal(rewriteComposition([{ id: "persona", name: "@deepseek-ai/dsh-persona" }], 0.45).found, false);
+});
+
+test("declaredDefinitions reads preset rows off the loader, id-first", () => {
+	const definition = { id: "standard", order: 1, plugins: [{ id: "compaction-basic", name: "x" }] };
+	const loader = {
+		entries: () => [
+			{ options: { id: "preset-standard", name: "@deepseek-ai/dsh-agent-preset", config: definition } },
+			{ options: { id: "compact-threshold", name: "dsh-compact-threshold", config: { thresholdRatio: 0.4 } } },
+			{ options: { id: "preset-broken", name: "@deepseek-ai/dsh-agent-preset", config: { id: "broken" } } },
+		],
+	};
+	const declared = declaredDefinitions(loader);
+	assert.deepEqual([...declared.keys()], ["standard"]);
+	assert.equal(declared.get("standard"), definition);
+	assert.equal(declaredDefinitions(undefined).size, 0, "a host without a loader declares nothing");
+});
+

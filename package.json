@@ -1,7 +1,7 @@
 {
   "name": "dsh-compact-threshold",
-  "version": "0.2.0",
-  "description": "One settings card that gives every DSH agent preset its own compaction threshold: the plugin authors <mode>-compact-<ratio> preset copies with compaction-basic.thresholdRatio rewritten and adopts one as the default Agent mode (标准 > 创造 > 极简 > ptc, any copy before a mode without a threshold), so 0.4 (or any value) applies to every mode instead of only a hand-made preset.",
+  "version": "0.3.3",
+  "description": "One settings card that gives every DSH agent preset its own compaction threshold: the plugin authors <mode>-compact-<ratio> preset copies with compaction-basic.thresholdRatio rewritten and adopts one as the default Agent mode (标准 > 创造 > 极简 > ptc, any copy before a mode without a threshold), so 0.4 (or any value) applies to every mode instead of only a hand-made preset. Works on both DSH settings generations: the 0.1.5-rc.x plugin-owned settings namespace and the 0.1.7+ volatile profile-entry form.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -29,7 +29,7 @@
   ],
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-settings": "^0.1.2-alpha.1 || ^0.1.5-rc.2",
+    "@deepseek-ai/dsh-settings": "^0.1.2-alpha.1 || ^0.1.5-rc.2 || ^0.1.7-alpha.1",
     "@deepseek-ai/schemastery": "^3.18.1"
   },
   "peerDependenciesMeta": {
